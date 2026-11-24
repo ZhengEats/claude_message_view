@@ -1,0 +1,10 @@
+# 运行时私人数据 / private runtime data（不入库）
+archive/
+favorites.json
+settings.json
+startup.log
+claude_message_view_startup.vbs
+
+# Python
+__pycache__/
+*.pyc
