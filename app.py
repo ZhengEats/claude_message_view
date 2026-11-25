@@ -223,14 +223,17 @@ def load_all_sessions():
     return sessions
 
 
-# ---------- 收藏（持久化到 favorites.json，存 {id: 备注}）----------
+# ---------- 收藏（持久化到 favorites.json，存 {id: 备注} + "__order__": [id…]）----------
+_ORDER_KEY = "__order__"
+
+
 def load_favorites():
-    """返回 dict: {session_id: 备注}。备注可为空字符串。"""
+    """返回 dict: {session_id: 备注}。备注可为空字符串。不含顺序信息。"""
     try:
         with open(FAV_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
-                return {str(k): (v or "") for k, v in data.items()}
+                return {str(k): str(v or "") for k, v in data.items() if k != _ORDER_KEY}
             # 兼容旧的 list 格式
             if isinstance(data, list):
                 return {str(k): "" for k in data}
@@ -239,10 +242,33 @@ def load_favorites():
     return {}
 
 
-def save_favorites(favs):
+def load_fav_order(favs):
+    """返回收藏的排序 id 列表：按已保存顺序，没存过顺序的（新收藏）追加在后面。"""
+    order = []
+    try:
+        with open(FAV_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get(_ORDER_KEY), list):
+            seen = set()
+            for sid in data[_ORDER_KEY]:
+                sid = str(sid)
+                if sid in favs and sid not in seen:
+                    order.append(sid)
+                    seen.add(sid)
+    except (OSError, json.JSONDecodeError):
+        pass
+    order.extend(sid for sid in favs if sid not in set(order))
+    return order
+
+
+def save_favorites(favs, order=None):
+    """写入收藏；order 为 None 时不改动已保存的顺序。"""
+    if order is None:
+        order = load_fav_order(favs)
+    data = {_ORDER_KEY: order, **favs}
     try:
         with open(FAV_FILE, "w", encoding="utf-8") as f:
-            json.dump(favs, f, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False)
     except OSError:
         pass
 
@@ -310,7 +336,10 @@ def sync_archive():
             shutil.copyfile(src, dst)
         except OSError:
             continue
+        old_note = meta.get(sid, {}).get("note")  # 保留取消收藏时留存的备注
         meta[sid] = _archive_meta_of(s, src)
+        if isinstance(old_note, str) and old_note:
+            meta[sid]["note"] = old_note
         changed = True
     if changed:
         try:
@@ -522,7 +551,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* ---------- 页头 ---------- */
   .hd{display:flex;align-items:center;gap:16px;margin-bottom:14px}
   .hd-tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
-  .hd-tools>#setBtn{margin-left:auto} /* 搜索、下拉靠左；设置和页签靠右 */
+  .hd-tools>#openAllBtn{margin-left:auto} /* 搜索、下拉靠左；打开收藏、设置和页签靠右 */
   .seg{display:inline-flex;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:3px;gap:2px}
   .seg button{border:0;background:transparent;color:var(--text2);font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;
     cursor:pointer;display:inline-flex;align-items:center;gap:7px;transition:background .15s,color .15s}
@@ -584,12 +613,25 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .btn:disabled{opacity:.55;cursor:default;transform:none}
 
   .favnote-row{grid-column:2 / -1;display:flex;align-items:center;gap:6px}
+  /* 收藏页序号（可拖动排序 / 点击改号） */
+  .ord{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:22px;margin-right:9px;
+    border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--muted);
+    font-family:"Cascadia Mono",ui-monospace,Consolas,monospace;font-size:11.5px;vertical-align:3px;user-select:none;
+    transition:border-color .15s,color .15s}
+  .ord.can{cursor:grab}
+  .ord.can:hover{border-color:var(--accent);color:var(--accent-ink)}
+  .ord.can:active{cursor:grabbing}
+  .ordin{width:46px;height:24px;margin-right:9px;border:1px solid var(--accent);border-radius:6px;background:var(--surface);
+    box-shadow:var(--ring);font-family:inherit;font-size:12px;text-align:center;outline:none;vertical-align:3px}
+  .row.dragover{outline:2px dashed var(--accent);outline-offset:-3px}
+  .row.dragging{opacity:.45}
   .favnote-row svg{width:14px;height:14px;color:var(--muted)}
   .favnote-row input{flex:1;height:28px;background:transparent;border:1px solid transparent;border-radius:6px;padding:0 8px;
     font-size:12.5px;color:var(--text2);outline:none;transition:background .15s,border-color .15s,box-shadow .15s}
   .favnote-row input:hover{background:var(--surface2)}
   .favnote-row input:focus{background:var(--surface);border-color:var(--accent);box-shadow:var(--ring)}
   .favnote-row input::placeholder{color:var(--muted)}
+  .favnote-txt{font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* ---------- 底部分页 ---------- */
   .foot{display:flex;justify-content:space-between;align-items:center;margin-top:16px;color:var(--muted);font-size:13px;flex-wrap:wrap;gap:12px}
@@ -604,45 +646,64 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .empty{text-align:center;padding:72px 20px;color:var(--muted);font-size:13.5px}
   .empty svg{width:28px;height:28px;stroke-width:1.4;color:var(--border-strong);display:block;margin:0 auto 10px}
 
-  /* ---------- 详情弹窗 ---------- */
+  /* ---------- 弹窗（详情 / 设置 / 确认） ---------- */
   .mask{position:fixed;inset:0;background:rgba(30,26,22,.45);display:none;align-items:center;justify-content:center;
-    z-index:50;backdrop-filter:blur(3px);padding:24px}
-  .mask.show{display:flex}
+    z-index:50;backdrop-filter:blur(4px);padding:24px}
+  .mask.show{display:flex;animation:fadein .18s ease-out}
+  @keyframes fadein{from{opacity:0}to{opacity:1}}
   .modal{background:var(--surface);border:1px solid var(--border);border-radius:16px;width:720px;max-width:100%;max-height:84vh;
-    display:flex;flex-direction:column;box-shadow:0 24px 64px -12px rgba(30,20,10,.35);animation:pop .16s ease-out}
-  @keyframes pop{from{opacity:0;transform:translateY(6px) scale(.985)}to{opacity:1;transform:none}}
+    display:flex;flex-direction:column;box-shadow:0 24px 64px -12px rgba(30,20,10,.35),0 2px 8px rgba(30,20,10,.12);
+    animation:pop .22s cubic-bezier(.16,1,.3,1)}
+  @keyframes pop{from{opacity:0;transform:translateY(14px) scale(.97)}to{opacity:1;transform:none}}
   .mhd{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 18px 14px 20px;border-bottom:1px solid var(--border)}
   .mhd h3{font-size:16px;font-weight:650;line-height:1.35;word-break:break-word}
+  .mhd .iconbtn{flex:none;margin:-2px -6px 0 0;width:32px;height:32px;border-radius:8px}
   .msub{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12.5px;margin-top:6px;flex-wrap:wrap}
   .msub .sep{color:var(--border-strong)}
-  .bd{padding:18px 20px;overflow:auto;flex:1}
+  .bd{padding:18px 20px;overflow:auto;flex:1;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+  .bd::-webkit-scrollbar{width:10px}
+  .bd::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:5px;border:3px solid var(--surface)}
+  .bd::-webkit-scrollbar-track{background:transparent}
   .cap{font-size:12px;color:var(--muted);margin-bottom:12px}
   .msg{display:flex;flex-direction:column;margin-bottom:14px;max-width:86%}
   .msg .who{font-size:11.5px;color:var(--muted);margin-bottom:4px;font-weight:500}
   .msg .bubble{border-radius:12px;padding:10px 14px;font-size:13.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word;
-    background:var(--surface2);max-height:260px;overflow:auto}
+    background:var(--surface2);max-height:260px;overflow:auto;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+  .msg .bubble::-webkit-scrollbar{width:8px}
+  .msg .bubble::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
   .msg.user{align-items:flex-end;margin-left:auto}
   .msg.user .who{color:var(--accent-ink)}
   .msg.user .bubble{background:var(--accent-soft);border-top-right-radius:4px}
   .msg.assistant .bubble{border-top-left-radius:4px}
-  .mft{display:flex;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--border)}
+  .mft{display:flex;justify-content:flex-end;gap:8px;padding:12px 16px;border-top:1px solid var(--border);
+    background:var(--surface2);border-radius:0 0 16px 16px}
+  .btn.danger{background:#c2452f;border-color:transparent;color:#fff}
+  .btn.danger:hover{background:#a93a27;color:#fff}
+  .modal.tiny{width:420px}
+  .cmsg{font-size:13.5px;line-height:1.7;color:var(--text2);margin:0;white-space:pre-wrap;word-break:break-word}
 
   /* ---------- 提示 ---------- */
-  .toast{position:fixed;left:50%;bottom:32px;transform:translate(-50%,12px);display:flex;align-items:center;gap:8px;
-    background:#26221e;color:#f5f2ee;padding:9px 16px;border-radius:10px;font-size:13px;opacity:0;pointer-events:none;
-    transition:opacity .2s,transform .2s;z-index:99;max-width:90vw;box-shadow:0 8px 24px rgba(0,0,0,.2)}
+  .toast{position:fixed;left:50%;bottom:32px;transform:translate(-50%,16px);display:flex;align-items:center;gap:9px;
+    background:#26221e;color:#f5f2ee;padding:10px 18px;border-radius:12px;font-size:13px;opacity:0;pointer-events:none;
+    transition:opacity .22s,transform .22s cubic-bezier(.16,1,.3,1);z-index:99;max-width:90vw;
+    box-shadow:0 8px 24px rgba(0,0,0,.25),0 2px 6px rgba(0,0,0,.15);border:1px solid rgba(255,255,255,.08)}
   .toast.show{opacity:1;transform:translate(-50%,0)}
-  .toast::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);flex:none}
+  .toast svg{width:15px;height:15px;flex:none;color:var(--accent-ink)}
+  .toast.err svg{color:#ff8f78}
+  .toast.err{border-color:rgba(255,110,80,.25)}
 
   /* ---------- 全文命中 / 临期提示 / 归档 / 新会话通知 ---------- */
   .hitn{color:var(--accent-ink);background:var(--accent-soft);border-radius:5px;padding:0 6px;line-height:20px;font-size:11.5px}
   .aging{display:block;color:#b0621d;font-size:11px;margin-top:2px}
   html[data-theme="dark"] .aging{color:#d79a55}
   .arch{font-size:11px;color:var(--muted);border:1px solid var(--border-strong);border-radius:5px;padding:0 6px;margin-left:8px;vertical-align:2px;white-space:nowrap}
-  .newbar{position:fixed;right:24px;bottom:28px;display:none;background:#26221e;color:#f5f2ee;padding:10px 16px;
-    border-radius:10px;cursor:pointer;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);z-index:90}
-  .newbar.show{display:block}
+  .newbar{position:fixed;right:24px;bottom:28px;display:none;align-items:center;gap:9px;background:#26221e;color:#f5f2ee;
+    padding:11px 18px;border-radius:12px;cursor:pointer;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);
+    z-index:90;border:1px solid rgba(255,255,255,.08)}
+  .newbar.show{display:flex;animation:rise .25s cubic-bezier(.16,1,.3,1)}
+  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
   .newbar:hover{background:#38322c}
+  .newbar svg{width:15px;height:15px;flex:none;color:var(--accent-ink)}
   .snips{background:var(--surface2);border-radius:10px;padding:10px 14px 12px;margin-bottom:16px}
   .snips .cap{margin-bottom:2px}
   .snip{font-size:12.5px;color:var(--text2);margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -668,7 +729,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .ferr{font-size:12px;color:#c2452f;margin-top:6px;display:none}
   .ferr.show{display:block}
   html[data-theme="dark"] .ferr{color:#ff8f78}
-  .toast{border:1px solid rgba(255,255,255,.08)}
 
   /* ---------- 夜晚模式 ---------- */
   html[data-theme="dark"]{
@@ -688,7 +748,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   @media (max-width:760px){
     body{padding:24px 16px 48px}
     .hd{flex-direction:column;align-items:stretch}
-    .hd-tools>#setBtn{margin-left:0}
+    .hd-tools>#setBtn,.hd-tools>#openAllBtn{margin-left:0}
     .row{grid-template-columns:28px minmax(0,1fr) auto}
     .time{display:none}
     .btn .lbl{display:none}
@@ -711,6 +771,10 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <select id="proj"><option value="">全部项目</option></select>
         <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
       </div>
+      <button class="btn" id="openAllBtn" onclick="openAllFavs()" title="按收藏顺序，把所有收藏的会话各开一个终端标签页">
+        <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span>打开收藏</span>
+      </button>
       <button class="btn" id="setBtn" onclick="openSettings()" title="设置：外观与模型">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         <span id="setModel">…</span>
@@ -784,6 +848,18 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
+<div class="mask" id="cmask" style="z-index:70">
+  <div class="modal tiny">
+    <div class="mhd">
+      <div><h3 id="ctitle"></h3></div>
+    </div>
+    <div class="bd" style="padding-top:16px"><p class="cmsg" id="cmsg"></p></div>
+    <div class="mft">
+      <button class="btn" id="cCancel">取消</button>
+      <button class="btn danger" id="cOk">确定</button>
+    </div>
+  </div>
+</div>
 <div class="newbar" id="newbar" title="点击查看"></div>
 <div class="toast" id="toast"></div><script>
 const DEFAULT_MODEL="__MODEL__";
@@ -826,32 +902,58 @@ function fmtFull(s){
 function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
 let VIEW='all'; // 'all' | 'fav' | 'arch'
-const findD=id=>ALL.find(x=>x.id===id)||FAV.find(x=>x.id===id)||ARCH.find(x=>x.id===id);
-function rowHtml(d){
+// 优先在当前视图的数据里找（三个视图是三份独立对象，改谁的星标就渲染谁），
+// 找不到再退回其他视图，保证详情弹窗等场景也能取到数据
+function findD(id){
+  const pools = VIEW==='fav'?[FAV,ALL,ARCH] : VIEW==='arch'?[ARCH,ALL,FAV] : [ALL,FAV,ARCH];
+  for(const p of pools){ const d=p.find(x=>x.id===id); if(d) return d; }
+}
+// 收藏状态变化时同步到三个视图的同 id 条目，避免其他视图星标显示过期
+function mirrorFav(id,patch){
+  [ALL,FAV,ARCH].forEach(p=>{ const x=p.find(y=>y.id===id); if(x) Object.assign(x,patch); });
+}
+function canReorder(){ // 仅收藏视图且没有搜索/筛选时可拖动改序（否则序号没有意义）
+  return VIEW==='fav' && !$('q').value.trim() && !$('proj').value;
+}
+function ordHtml(d,idx){
+  if(VIEW!=='fav') return '';
+  const n=(idx??0)+1;
+  const can=canReorder();
+  return can
+    ? `<span class="ord can" draggable="true" title="拖动调整顺序，或点击输入序号" onclick="editOrd('${d.id}',this,${n})"
+         ondragstart="dragStart(event,'${d.id}')" ondragend="dragEnd(event)">${n}</span>`
+    : `<span class="ord" title="清除搜索/筛选后可调整顺序">${n}</span>`;
+}
+function rowHtml(d,idx){
   const dead=d.archived&&!d.live; // 原会话已被清理，只剩归档副本
   const noteRow = VIEW!=='all'&&d.fav
     ? `<div class="favnote-row">${ICON.note}
          <input value="${esc(d.favNote||'')}" placeholder="添加备注…" onclick="event.stopPropagation()" onblur="saveNote('${d.id}',this.value)">
-       </div>` : '';
+       </div>`
+    : VIEW==='arch'&&(d.favNote||'').trim()
+    ? `<div class="favnote-row" title="收藏时留下的备注，重新收藏会自动找回">${ICON.note}<span class="favnote-txt">${esc(d.favNote)}</span></div>`
+    : '';
   const hit=SEARCH_HITS[d.id];
   const hitn=hit?`<span class="sep">·</span><span class="hitn" title="全文搜索命中">全文 ${hit.hits} 处</span>`:'';
   const ageDays=d.time?(Date.now()-new Date(d.time))/864e5:0;
   const aging=!d.archived&&ageDays>=24
     ?`<span class="aging" title="Claude Code 默认保留 ${30} 天不用就自动删除，收藏可自动备份">还有 ${Math.max(1,Math.ceil(30-ageDays))} 天被清理</span>`:'';
   const archTag=dead?`<span class="arch" title="原会话已被 Claude Code 清理，这是归档副本">已归档</span>`:'';
+  const drag = canReorder()
+    ? ` ondragover="dragOver(event,'${d.id}')" ondrop="dropRow(event,'${d.id}')" ondragleave="dragLeave(event)"` : '';
   const ops = dead
     ? `<button class="btn primary" title="把归档副本写回 ~/.claude/projects，之后即可正常 resume" onclick="restore('${d.id}',event)">
          <svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
          <span class="lbl">恢复会话</span></button>
-       <button class="btn" title="删除这份备份（删了就找不回了）" onclick="delArchive('${d.id}',event)">
+       <button class="btn danger" title="删除这份备份（删了就找不回了）" onclick="delArchive('${d.id}',event)">
          <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
          <span class="lbl">删除备份</span></button>`
     : `<button class="btn" title="复制 resume 命令到剪贴板" onclick="copyCmd('${d.id}',event)">${ICON.copy}<span class="lbl">复制命令</span></button>
        <button class="btn primary" title="${TERM_TITLE}" onclick="openTerm('${d.id}',event)">${ICON.term}<span class="lbl">打开终端</span></button>`;
-  return `<div class="row" onclick="view('${d.id}')" title="点击查看最近的消息">
+  return `<div class="row" onclick="view('${d.id}')" title="点击查看最近的消息"${drag}>
     <button class="iconbtn ${d.fav?'on':''}" title="${d.fav?'取消收藏':'收藏（自动备份，不怕 30 天清理）'}" onclick="toggleFav('${d.id}',${!d.fav},event)">${ICON.star}</button>
     <div class="txt">
-      <div class="name">${esc(d.name)}${archTag}</div>
+      <div class="name">${ordHtml(d,(page-1)*PAGE_SIZE+idx)}${esc(d.name)}${archTag}</div>
       <div class="meta">
         <span class="proj" title="${esc(d.path)}">${esc(d.proj)}</span>
         <span class="sep">·</span><span>${d.msgs} 条消息</span>${hitn}
@@ -861,6 +963,53 @@ function rowHtml(d){
     <div class="ops">${ops}</div>
     ${noteRow}
   </div>`;
+}
+// ---------- 收藏排序（拖动 / 改序号） ----------
+let dragId=null;
+function dragStart(ev,id){ dragId=id; ev.dataTransfer.effectAllowed='move'; ev.target.closest('.row').classList.add('dragging'); }
+function dragEnd(ev){ dragId=null; document.querySelectorAll('.row.dragging,.row.dragover').forEach(r=>r.classList.remove('dragging','dragover')); }
+function dragOver(ev,id){ if(!dragId||dragId===id) return; ev.preventDefault(); ev.dataTransfer.dropEffect='move'; ev.currentTarget.classList.add('dragover'); }
+function dragLeave(ev){ ev.currentTarget.classList.remove('dragover'); }
+function dropRow(ev,id){
+  ev.preventDefault(); ev.currentTarget.classList.remove('dragover');
+  if(!dragId||dragId===id) return;
+  const from=FAV.findIndex(x=>x.id===dragId), to=FAV.findIndex(x=>x.id===id);
+  if(from<0||to<0) return;
+  const [it]=FAV.splice(from,1); FAV.splice(to,0,it);
+  dragId=null;
+  persistOrder();
+}
+function editOrd(id,el,n){
+  if(!canReorder()) return;
+  const row=el.closest('.name');
+  const inp=document.createElement('input');
+  inp.type='number'; inp.className='ordin'; inp.min=1; inp.max=FAV.length; inp.value=n;
+  el.replaceWith(inp); inp.focus(); inp.select();
+  let done=false;
+  const commit=()=>{
+    if(done) return; done=true;
+    const v=parseInt(inp.value,10);
+    inp.replaceWith(el);
+    if(!isNaN(v)&&v>=1&&v<=FAV.length&&v!==n){
+      const from=FAV.findIndex(x=>x.id===id);
+      if(from>=0){ const [it]=FAV.splice(from,1); FAV.splice(v-1,0,it); persistOrder(); return; }
+    }
+  };
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Enter') commit();
+    else if(e.key==='Escape'){ done=true; inp.replaceWith(el); }
+    e.stopPropagation();
+  });
+  inp.addEventListener('blur',commit);
+  inp.addEventListener('click',e=>e.stopPropagation());
+}
+async function persistOrder(){
+  applyFilter(); // 立即按新顺序重渲染（序号也跟着变）
+  try{
+    const r=await fetch('/api/fav/order',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({order:FAV.map(x=>x.id)})}).then(r=>r.json());
+    if(!r.ok) showToast(r.error||'保存顺序失败','err');
+  }catch(e){ showToast('保存顺序失败','err'); }
 }
 function pageList(cur,pages){
   if(pages<=7) return Array.from({length:pages},(_,i)=>i+1);
@@ -890,8 +1039,7 @@ async function toggleFav(id,fav,ev){
   if(!d) return;
   const note=fav?(d.favNote||''):'';
   await fetch('/api/fav',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,fav,note})});
-  d.fav=fav;
-  if(!fav) d.favNote='';
+  mirrorFav(id,fav?{fav:true}:{fav:false,favNote:''});
   FAVS_COUNT=Math.max(0,FAVS_COUNT+(fav?1:-1));
   updateBadges();
   // 收藏视图里取消收藏：从当前列表移除
@@ -906,7 +1054,7 @@ async function saveNote(id,note){
   const d=findD(id);
   if(!d) return;
   if(d.favNote===note) return;
-  d.favNote=note;
+  mirrorFav(id,{favNote:note});
   await fetch('/api/fav',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,fav:true,note})});
   showToast('备注已保存');
 }
@@ -1036,7 +1184,8 @@ async function restore(id,ev){
 }
 async function delArchive(id,ev){
   ev.stopPropagation();
-  if(!confirm('确定删除这份备份？原会话已被清理，删了就找不回了。')) return;
+  const ok=await askConfirm('删除备份','确定删除这份备份？\n原会话已被清理，删了就找不回了。',{ok:'删除备份',danger:true});
+  if(!ok) return;
   const btn=ev.target.closest('button');
   if(btn) btn.disabled=true;
   try{
@@ -1074,14 +1223,52 @@ async function openTerm(id,ev){
   }catch(e){showToast('打开失败：'+e,'err');}
   if(btn) btn.disabled=false;
 }
+async function openAllFavs(){
+  const btn=$('openAllBtn');
+  const n=Math.max(FAVS_COUNT,ALL.filter(d=>d.fav).length);
+  if(!n){ showToast('还没有收藏任何会话','err'); return; }
+  const ok=await askConfirm('打开收藏的会话',`将按收藏顺序打开 ${n} 个终端标签页，每个标签页会启动一个 claude resume。\n继续吗？`,{ok:'打开'});
+  if(!ok) return;
+  btn.disabled=true;
+  try{
+    const r=await fetch('/api/open_all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json());
+    if(r.ok) showToast(`已打开 ${r.opened} 个标签页${r.skipped?`（${r.skipped} 个只剩归档，已跳过）`:''}`);
+    else showToast('打开失败：'+(r.error||'未知错误'),'err');
+  }catch(e){ showToast('打开失败：'+e,'err'); }
+  btn.disabled=false;
+}
 function showToast(m,kind){
   const el=$('toast');
-  el.textContent=m;
   el.classList.toggle('err',kind==='err');
+  el.innerHTML=(kind==='err'
+    ?'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>'
+    :'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="6.5 12.5 10.5 16 17.5 9"/></svg>')
+    +'<span></span>';
+  el.lastChild.textContent=m;
   el.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>el.classList.remove('show'),kind==='err'?3500:2000);
 }
+// ---------- 自定义确认弹窗（替代原生 confirm） ----------
+let confirmResolve=null;
+function askConfirm(title,msg,{ok='确定',danger=false}={}){
+  $('ctitle').textContent=title;
+  $('cmsg').textContent=msg;
+  const okBtn=$('cOk');
+  okBtn.textContent=ok;
+  okBtn.className='btn '+(danger?'danger':'primary');
+  $('cmask').classList.add('show');
+  okBtn.focus();
+  return new Promise(res=>{confirmResolve=res;});
+}
+function settleConfirm(v){
+  if(!confirmResolve) return;
+  $('cmask').classList.remove('show');
+  const r=confirmResolve; confirmResolve=null; r(v);
+}
+$('cOk').addEventListener('click',()=>settleConfirm(true));
+$('cCancel').addEventListener('click',()=>settleConfirm(false));
+$('cmask').addEventListener('click',e=>{if(e.target.id==='cmask')settleConfirm(false);});
 
 /* ---------- 设置：外观 + 模型 ---------- */
 function applyTheme(t){document.documentElement.dataset.theme=t==='dark'?'dark':'';}
@@ -1162,7 +1349,8 @@ $('mCopy').addEventListener('click',()=>{if(curId)copyCmd(curId);});
 $('mOpen').addEventListener('click',()=>{if(curId)openTerm(curId);});
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    if($('smask').classList.contains('show')) closeSettings(); else closeM();
+    if($('cmask').classList.contains('show')) settleConfirm(false);
+    else if($('smask').classList.contains('show')) closeSettings(); else closeM();
     return;
   }
   const t=document.activeElement.tagName;
@@ -1205,7 +1393,8 @@ async function poll(){
     ALL=list;
     updateBadges();
     if(fresh.length && !$('q').value.trim() && !$('mask').classList.contains('show')){
-      $('newbar').textContent=`发现 ${fresh.length} 个新会话，点击查看`;
+      $('newbar').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4"/><path d="M12 16h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>'
+        +`<span>发现 ${fresh.length} 个新会话，点击查看</span>`;
       $('newbar').classList.add('show');
     }
   }catch(e){/* 服务暂时不可达就等下一轮 */}
@@ -1301,6 +1490,42 @@ def open_in_terminal(sid):
     return True, ""
 
 
+def open_all_favorites():
+    """按收藏顺序，一次性在最近使用的 WT 窗口里开 N 个标签页 resume 全部收藏会话。
+
+    只开仍存活的会话；已被清理的（只剩归档）跳过。返回 (ok, err, 打开数, 跳过数)。
+    """
+    refresh()
+    model = current_settings()["model"]
+    targets = [sid for sid in load_fav_order(load_favorites())
+               if INDEX_CACHE.get(sid)]
+    skipped = len(load_favorites()) - len(targets)
+    if not targets:
+        return False, "没有可打开的收藏会话（可能都只剩归档副本）", 0, skipped
+    # 一条 wt 命令行开多个 tab：wt new-tab … ; new-tab …（wt 用 ; 分隔多条子命令）
+    args = ["wt.exe", "-w", "last"]
+    for i, sid in enumerate(targets):
+        s = INDEX_CACHE[sid]
+        if i:
+            args.append(";")
+        title = "".join(c for c in s["name"][:30] if c.isprintable()) or "claude"
+        args += ["new-tab", "--title", title]
+        if s["path"] and os.path.isdir(s["path"]):
+            args += ["-d", s["path"]]
+        args += ["pwsh.exe", "-NoExit", "-Command",
+                 "claude", "--dangerously-skip-permissions", "--model", model,
+                 "--resume", sid]
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=30,
+                           env=_clean_child_env())
+    except Exception as e:
+        return False, f"启动终端失败：{e}", 0, skipped
+    if r.returncode != 0:
+        err = (r.stderr or b"").decode("utf-8", "replace").strip()
+        return False, err or f"wt.exe 退出码 {r.returncode}", 0, skipped
+    return True, "", len(targets), skipped
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # 静默日志
@@ -1362,32 +1587,38 @@ class Handler(BaseHTTPRequestHandler):
                              "has_more": start > 0})
 
         elif path == "/api/favs":
-            # 返回收藏列表（合并会话信息 + 备注），按收藏的会话时间倒序。
+            # 返回收藏列表（合并会话信息 + 备注），按用户排好的顺序（收藏页可拖动/改序号）。
             # 原会话已被 30 天清理删掉的，用归档副本顶上并标记 archived。
             refresh()
             favs = load_favorites()
             idx = INDEX_CACHE
             meta = load_archive_meta()
-            items = []
-            for sid, note in favs.items():
+
+            def item_of(sid, note):
                 s = idx.get(sid)
                 if s:
-                    items.append({
+                    return {
                         "id": s["id"], "name": s["name"], "proj": s["proj"],
                         "path": s["path"], "preview": s["preview"], "msgs": s["msgs"],
                         "time": s["time"], "fav": True, "favNote": note,
                         "archived": False,
-                    })
-                elif sid in meta and _archive_file(sid):
+                    }
+                if sid in meta and _archive_file(sid):
                     m = meta[sid]
-                    items.append({
+                    return {
                         "id": sid, "name": m.get("name", "(未知会话)"),
                         "proj": m.get("proj", ""), "path": m.get("path", ""),
                         "preview": "", "msgs": m.get("msgs", 0),
                         "time": m.get("time", ""), "fav": True, "favNote": note,
                         "archived": True,
-                    })
-            items.sort(key=lambda x: x["time"], reverse=True)
+                    }
+                return None
+
+            items = []
+            for sid in load_fav_order(favs):
+                it = item_of(sid, favs.get(sid, ""))
+                if it:
+                    items.append(it)
             json_resp(self, {"sessions": items})
 
         elif path == "/api/search":
@@ -1421,7 +1652,7 @@ class Handler(BaseHTTPRequestHandler):
                     "msgs": s.get("msgs", m.get("msgs", 0)),
                     "time": s.get("time", m.get("time", "")),
                     "fav": sid in favs,
-                    "favNote": favs.get(sid, ""),
+                    "favNote": favs.get(sid) or (m.get("note") if isinstance(m.get("note"), str) else "") or "",
                     "archived": True,
                     "live": sid in idx,
                 })
@@ -1449,13 +1680,57 @@ class Handler(BaseHTTPRequestHandler):
             # body: {id, fav(bool), note(str 可选)}
             sid = str(body.get("id", ""))
             favs = load_favorites()
+            order = load_fav_order(favs)
             if body.get("fav"):
-                favs[sid] = str(body.get("note", "") or "")
+                was_fav = sid in favs
+                note = str(body.get("note", "") or "")
+                meta = load_archive_meta()
+                if not note and not was_fav:
+                    # 重新收藏时找回归档里留存的备注
+                    m = meta.get(sid)
+                    if m and isinstance(m.get("note"), str):
+                        note = m["note"]
+                favs[sid] = note
+                if sid not in order:
+                    order.append(sid)  # 新收藏排到最后
+                if sid in meta:  # 收藏期间备注变化同步进归档，取消收藏后仍可见
+                    meta[sid]["note"] = note
+                    try:
+                        save_archive_meta(meta)
+                    except OSError:
+                        pass
             else:
+                note = favs.get(sid, "")
                 favs.pop(sid, None)
-            save_favorites(favs)
+                if sid in order:
+                    order.remove(sid)
+                meta = load_archive_meta()
+                if note and sid in meta:
+                    # 取消收藏：备注留在归档 meta 里，归档页仍可见，重新收藏时找回
+                    meta[sid]["note"] = note
+                    try:
+                        save_archive_meta(meta)
+                    except OSError:
+                        pass
+            save_favorites(favs, order)
             refresh()  # 刷新索引并立即归档新收藏（不必等下次请求）
             json_resp(self, {"ok": True, "fav": sid in favs})
+
+        elif path == "/api/fav/order":
+            # body: {order: [session_id…]} —— 收藏页拖动/改序号后的完整新顺序
+            order = body.get("order")
+            favs = load_favorites()
+            if not isinstance(order, list) or not all(_SID_RE.match(str(s)) for s in order):
+                json_resp(self, {"ok": False, "error": "顺序列表不合法"})
+                return
+            order = [str(s) for s in order]
+            if len(set(order)) != len(order) or any(s not in favs for s in order):
+                json_resp(self, {"ok": False, "error": "顺序列表与收藏不一致"})
+                return
+            # 没出现在提交顺序里的收藏（比如另一处刚加的）保持在后面
+            order.extend(sid for sid in favs if sid not in set(order))
+            save_favorites(favs, order)
+            json_resp(self, {"ok": True})
 
         elif path == "/api/restore":
             # 把归档副本写回 ~/.claude/projects 原位置，让被清理的会话可再次 resume
@@ -1465,6 +1740,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/open":
             ok, err = open_in_terminal(str(body.get("id", "")))
             json_resp(self, {"ok": ok, "error": err})
+
+        elif path == "/api/open_all":
+            # 按收藏顺序一键打开全部收藏会话（各开一个 WT 标签页）
+            ok, err, opened, skipped = open_all_favorites()
+            json_resp(self, {"ok": ok, "error": err, "opened": opened, "skipped": skipped})
 
         elif path == "/api/settings":
             # body: {model(str，可空=用默认), theme('light'|'dark')}

@@ -8,3 +8,6 @@ claude_message_view_startup.vbs
 # Python
 __pycache__/
 *.pyc
+
+# 浏览器测试产物
+.playwright-mcp/
