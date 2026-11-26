@@ -697,13 +697,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .aging{display:block;color:#b0621d;font-size:11px;margin-top:2px}
   html[data-theme="dark"] .aging{color:#d79a55}
   .arch{font-size:11px;color:var(--muted);border:1px solid var(--border-strong);border-radius:5px;padding:0 6px;margin-left:8px;vertical-align:2px;white-space:nowrap}
-  .newbar{position:fixed;right:24px;bottom:28px;display:none;align-items:center;gap:9px;background:#26221e;color:#f5f2ee;
-    padding:11px 18px;border-radius:12px;cursor:pointer;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);
-    z-index:90;border:1px solid rgba(255,255,255,.08)}
-  .newbar.show{display:flex;animation:rise .25s cubic-bezier(.16,1,.3,1)}
-  @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-  .newbar:hover{background:#38322c}
-  .newbar svg{width:15px;height:15px;flex:none;color:var(--accent-ink)}
   .snips{background:var(--surface2);border-radius:10px;padding:10px 14px 12px;margin-bottom:16px}
   .snips .cap{margin-bottom:2px}
   .snip{font-size:12.5px;color:var(--text2);margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -860,7 +853,6 @@ PAGE_HTML = r"""<!DOCTYPE html>
     </div>
   </div>
 </div>
-<div class="newbar" id="newbar" title="点击查看"></div>
 <div class="toast" id="toast"></div><script>
 const DEFAULT_MODEL="__MODEL__";
 const PAGE_SIZE=__PAGESIZE__;
@@ -868,7 +860,7 @@ const MODEL_RE=/^[A-Za-z0-9._:[\]/-]*$/;
 let model=DEFAULT_MODEL;           // 当前生效的模型（设置里可改），用于复制命令和打开终端
 let theme='light', themeSaved='light';
 let ALL=[], FAV=[], ARCH=[], filtered=[], page=1, detailsCache={}, toastTimer=null;
-let SEARCH_HITS={}, searchSeq=0, knownIds=null; // 全文搜索结果；轮询用的新会话 id 集合
+let SEARCH_HITS={}, searchSeq=0; // 全文搜索结果
 const $=id=>document.getElementById(id);
 const ICON={
   star:'<svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>',
@@ -1176,7 +1168,6 @@ async function restore(id,ev){
     const r=await fetch('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
     showToast(r.ok?'已恢复原位，可以正常 resume 了':'恢复失败：'+(r.error||'未知错误'),r.ok?'':'err');
     if(r.ok){
-      knownIds=null; // 让轮询重建 id 集，避免把恢复回来的会话当成“新会话”
       await switchView(VIEW==='arch'?'arch':'fav');
     }
   }catch(e){showToast('恢复失败：'+e,'err');}
@@ -1371,7 +1362,6 @@ document.addEventListener('keydown',e=>{
   ALL=r.sessions||[];
   FAVS_COUNT=ALL.filter(s=>s.fav).length;
   $('archBadge').textContent=r.archCount??0;
-  knownIds=new Set(ALL.map(s=>s.id));
   updateBadges();
   // 项目下拉
   const projs=[...new Set(ALL.map(d=>d.proj))].sort();
@@ -1380,32 +1370,22 @@ document.addEventListener('keydown',e=>{
   applyFilter();
 })();
 
-/* ---------- 轮询发现新会话（30 秒一次；页面不可见或开着弹窗时跳过） ---------- */
+/* ---------- 每分钟自动刷新列表（静默更新，不弹提示） ---------- */
 async function poll(){
   if(document.visibilityState!=='visible') return;
+  // 正在搜索/筛选中不自动刷新列表，避免打乱用户操作；徽标数仍更新
+  const busy=$('q').value.trim()||$('proj').value||$('mask').classList.contains('show')||$('smask').classList.contains('show');
   try{
     const r=await fetch('/api/list').then(x=>x.json());
     const list=r.sessions||[];
     FAVS_COUNT=list.filter(s=>s.fav).length;
     $('archBadge').textContent=r.archCount??0;
-    if(!knownIds){ knownIds=new Set(list.map(s=>s.id)); ALL=list; updateBadges(); return; }
-    const fresh=list.filter(s=>!knownIds.has(s.id));
     ALL=list;
     updateBadges();
-    if(fresh.length && !$('q').value.trim() && !$('mask').classList.contains('show')){
-      $('newbar').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 8v4"/><path d="M12 16h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>'
-        +`<span>发现 ${fresh.length} 个新会话，点击查看</span>`;
-      $('newbar').classList.add('show');
-    }
+    if(!busy) applyFilter();
   }catch(e){/* 服务暂时不可达就等下一轮 */}
 }
-$('newbar').addEventListener('click',async()=>{
-  if(!ALL.length) return;
-  knownIds=new Set(ALL.map(s=>s.id));
-  $('newbar').classList.remove('show');
-  if(VIEW!=='all') await switchView('all'); else applyFilter();
-});
-setInterval(poll,30000);
+setInterval(poll,60000);
 </script>
 </body>
 </html>"""

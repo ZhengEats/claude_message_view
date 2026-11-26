@@ -15,7 +15,7 @@ English · [简体中文](README_ZH.md)
 - __⭐ Favorites with automatic backup__ — favorited sessions are backed up to `archive/`, so when Claude Code's 30-day cleanup deletes them they stay in your favorites list (marked "archived").
 - __♻️ One-click restore__ — "Restore session" writes the archived copy back to its original path so you can resume; "Open terminal" opens a new tab in your most-recently-used Windows Terminal window and resumes with PowerShell 7 — no copy-pasting.
 - __🗂️ Archive view__ — an "Archived" tab lists all backups (favorited or not), with restore / delete actions.
-- __⏰ Expiry & new-session alerts__ — sessions within a week of the 30-day cleanup show "N days until cleanup"; an open page polls every 30s and notifies you of new sessions.
+- __⏰ Expiry alerts & auto-refresh__ — sessions within a week of the 30-day cleanup show "N days until cleanup"; an open page silently refreshes the list every 60 seconds.
 - __🌗 Light / dark mode__ — settings also let you customize the `--model` argument (applies to both "Copy command" and "Open terminal").
 
 ## 🖼️ Screenshots
