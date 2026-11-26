@@ -486,15 +486,16 @@ def _snippet_of(line, q):
     return ("…" if lo > 0 else "") + out + ("…" if idx + len(q) + 90 < len(text) else "")
 
 
-# ---------- 设置（持久化到 settings.json：{model, theme}）----------
+# ---------- 设置（持久化到 settings.json：{model, theme, openAll, openAllIds}）----------
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 # 模型名会被拼进 claude 命令行，只放行常见的模型 ID 字符，防止夹带其他参数
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._:\[\]/-]+$")
 
 
 def load_settings():
-    """返回 {"model": str（空=用默认）, "theme": "light"|"dark"}；缺项或非法值回落到默认。"""
-    out = {"model": "", "theme": "light"}
+    """返回 {model, theme, openAll(bool), openAllIds(list|None)}。
+    openAllIds 为 None 表示从未配置过（默认=全部收藏）；[] 表示明确选了空集（一个都不开）。"""
+    out = {"model": "", "theme": "light", "openAll": True, "openAllIds": None}
     try:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -507,6 +508,11 @@ def load_settings():
             out["model"] = m
         if t in ("light", "dark"):
             out["theme"] = t
+        if isinstance(data.get("openAll"), bool):
+            out["openAll"] = data["openAll"]
+        ids = data.get("openAllIds")
+        if isinstance(ids, list):
+            out["openAllIds"] = [str(i) for i in ids if _SID_RE.match(str(i))]
     return out
 
 
@@ -518,7 +524,8 @@ def save_settings(s):
 def current_settings():
     """页面和「打开终端」实际使用的设置（model 已回落为默认值）。"""
     s = load_settings()
-    return {"model": s["model"] or MODEL, "defaultModel": MODEL, "theme": s["theme"]}
+    return {"model": s["model"] or MODEL, "defaultModel": MODEL, "theme": s["theme"],
+            "openAll": s["openAll"], "openAllIds": s["openAllIds"]}
 
 
 # ---------- HTTP 服务 ----------
@@ -551,7 +558,7 @@ PAGE_HTML = r"""<!DOCTYPE html>
   /* ---------- 页头 ---------- */
   .hd{display:flex;align-items:center;gap:16px;margin-bottom:14px}
   .hd-tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap;flex:1;min-width:0}
-  .hd-tools>#openAllBtn{margin-left:auto} /* 搜索、下拉靠左；打开收藏、设置和页签靠右 */
+  .hd-tools>#openAllBtn{margin-left:auto} /* 搜索、下拉靠左；一键打开、设置和页签靠右 */
   .seg{display:inline-flex;background:var(--surface2);border:1px solid var(--border);border-radius:11px;padding:3px;gap:2px}
   .seg button{border:0;background:transparent;color:var(--text2);font-size:13px;font-weight:500;padding:6px 14px;border-radius:8px;
     cursor:pointer;display:inline-flex;align-items:center;gap:7px;transition:background .15s,color .15s}
@@ -719,6 +726,19 @@ PAGE_HTML = r"""<!DOCTYPE html>
   .field input:focus{border-color:var(--accent);box-shadow:var(--ring)}
   .field input::placeholder{font-family:inherit;color:var(--muted)}
   .hint{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.6}
+  .ckrow{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);cursor:pointer;user-select:none}
+  .ckrow input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+  .cklist{margin-top:10px;max-height:180px;overflow:auto;border:1px solid var(--border);border-radius:var(--r);
+    padding:4px;scrollbar-width:thin;scrollbar-color:var(--border-strong) transparent}
+  .cklist::-webkit-scrollbar{width:8px}
+  .cklist::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:4px}
+  .cklist .ckitem{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer}
+  .cklist .ckitem:hover{background:var(--surface2)}
+  .cklist .ckitem input{width:14px;height:14px;accent-color:var(--accent);cursor:pointer;flex:none}
+  .cklist .ckitem .ckname{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cklist .ckitem .ckproj{font-size:11px;color:var(--muted);margin-left:auto;flex:none;max-width:110px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cklist .ckempty{padding:10px 8px;font-size:12px;color:var(--muted)}
   .ferr{font-size:12px;color:#c2452f;margin-top:6px;display:none}
   .ferr.show{display:block}
   html[data-theme="dark"] .ferr{color:#ff8f78}
@@ -764,9 +784,9 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <select id="proj"><option value="">全部项目</option></select>
         <svg viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg>
       </div>
-      <button class="btn" id="openAllBtn" onclick="openAllFavs()" title="按收藏顺序，把所有收藏的会话各开一个终端标签页">
+      <button class="btn" id="openAllBtn" onclick="openAllFavs()" title="按收藏顺序，把设置中勾选的收藏会话各开一个终端标签页">
         <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-        <span>打开收藏</span>
+        <span>一键打开</span>
       </button>
       <button class="btn" id="setBtn" onclick="openSettings()" title="设置：外观与模型">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -832,6 +852,12 @@ PAGE_HTML = r"""<!DOCTYPE html>
         <label for="modelInput">模型</label>
         <input id="modelInput" placeholder="留空则使用默认模型" autocomplete="off" spellcheck="false">
         <p class="hint">「复制命令」和「打开终端」都会使用这里填的模型。默认模型：<span id="defaultModel"></span></p>
+      </div>
+      <div class="field">
+        <label>一键打开</label>
+        <label class="ckrow"><input type="checkbox" id="openAllCk"><span>在工具栏显示「一键打开」按钮</span></label>
+        <div class="cklist" id="openAllList"></div>
+        <p class="hint">勾选「一键打开」按钮要打开的会话（只能选收藏中的会话，按收藏顺序打开，已被清理的自动跳过）。全部不勾 = 一个都不打开。</p>
         <p class="ferr" id="setErr"></p>
       </div>
     </div>
@@ -859,6 +885,8 @@ const PAGE_SIZE=__PAGESIZE__;
 const MODEL_RE=/^[A-Za-z0-9._:[\]/-]*$/;
 let model=DEFAULT_MODEL;           // 当前生效的模型（设置里可改），用于复制命令和打开终端
 let theme='light', themeSaved='light';
+let openAllOn=true;                // 「一键打开」按钮是否显示
+let openAllIds=null;               // 一键打开的会话范围：null=全部收藏（未配置过），[]=[]，数组=勾选的那些
 let ALL=[], FAV=[], ARCH=[], filtered=[], page=1, detailsCache={}, toastTimer=null;
 let SEARCH_HITS={}, searchSeq=0; // 全文搜索结果
 const $=id=>document.getElementById(id);
@@ -1216,9 +1244,9 @@ async function openTerm(id,ev){
 }
 async function openAllFavs(){
   const btn=$('openAllBtn');
-  const n=Math.max(FAVS_COUNT,ALL.filter(d=>d.fav).length);
-  if(!n){ showToast('还没有收藏任何会话','err'); return; }
-  const ok=await askConfirm('打开收藏的会话',`将按收藏顺序打开 ${n} 个终端标签页，每个标签页会启动一个 claude resume。\n继续吗？`,{ok:'打开'});
+  const targets=openAllTargets();
+  if(!targets.length){ showToast('设置里没有勾选任何要打开的会话','err'); return; }
+  const ok=await askConfirm('打开收藏的会话',`将按收藏顺序打开 ${targets.length} 个终端标签页，每个标签页会启动一个 claude resume。\n继续吗？`,{ok:'打开'});
   if(!ok) return;
   btn.disabled=true;
   try{
@@ -1270,6 +1298,14 @@ function applySettings(st){
   $('setModel').textContent=model;
   $('setModel').title=`当前模型：${model}（点击修改）`;
   $('defaultModel').textContent=st.defaultModel||DEFAULT_MODEL;
+  openAllOn=st.openAll!==false;              // 缺省（旧配置）= 开启
+  openAllIds=Array.isArray(st.openAllIds)?st.openAllIds:null;
+  $('openAllBtn').style.display=openAllOn?'':'none';
+}
+// 一键打开的目标数（供确认框提示）：存活收藏 ∩ 设置勾选
+function openAllTargets(){
+  const live=ALL.filter(d=>d.fav&&!d.archived);
+  return openAllIds==null?live:live.filter(d=>openAllIds.includes(d.id));
 }
 async function openSettings(){
   try{
@@ -1279,8 +1315,27 @@ async function openSettings(){
   $('modelInput').value=(model===$('defaultModel').textContent)?'':model;
   $('setErr').classList.remove('show');
   paintThemeSeg();
+  await paintOpenAllList();
   $('smask').classList.add('show');
   $('modelInput').focus();
+}
+async function paintOpenAllList(){
+  // 勾选列表：当前收藏中仍存活的会话（按收藏顺序）；已清理的打不开，不列出
+  let favs=[];
+  try{ favs=(await fetch('/api/favs').then(r=>r.json())).sessions||[]; }catch(e){}
+  const live=favs.filter(s=>!s.archived);
+  const box=$('openAllList');
+  $('openAllCk').checked=openAllOn;
+  if(!live.length){
+    box.innerHTML='<div class="ckempty">还没有收藏的会话</div>';
+    return;
+  }
+  box.innerHTML=live.map(s=>{
+    const ck=openAllIds==null||openAllIds.includes(s.id);
+    return `<label class="ckitem"><input type="checkbox" data-id="${s.id}" ${ck?'checked':''}>
+      <span class="ckname" title="${esc(s.name)}">${esc(s.name)}</span>
+      <span class="ckproj">${esc(s.proj)}</span></label>`;
+  }).join('');
 }
 function paintThemeSeg(){
   $('themeSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.t===theme));
@@ -1305,9 +1360,10 @@ $('setSave').addEventListener('click',async()=>{
     return;
   }
   const btn=$('setSave');btn.disabled=true;
+  const ids=[...$('openAllList').querySelectorAll('input:checked')].map(i=>i.dataset.id);
   try{
     const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:m,theme})}).then(r=>r.json());
+      body:JSON.stringify({model:m,theme,openAll:$('openAllCk').checked,openAllIds:ids})}).then(r=>r.json());
     if(!r.ok){
       $('setErr').textContent=r.error||'保存失败';
       $('setErr').classList.add('show');
@@ -1471,17 +1527,25 @@ def open_in_terminal(sid):
 
 
 def open_all_favorites():
-    """按收藏顺序，一次性在最近使用的 WT 窗口里开 N 个标签页 resume 全部收藏会话。
+    """按收藏顺序，一次性在最近使用的 WT 窗口里开 N 个标签页 resume 收藏会话。
 
-    只开仍存活的会话；已被清理的（只剩归档）跳过。返回 (ok, err, 打开数, 跳过数)。
+    打开范围由设置决定：openAllIds 为 None/空列表=全部收藏，否则只开勾选的那些
+    （按收藏顺序）。只开仍存活的会话；已被清理的（只剩归档）跳过。
+    返回 (ok, err, 打开数, 跳过数)。
     """
     refresh()
-    model = current_settings()["model"]
-    targets = [sid for sid in load_fav_order(load_favorites())
-               if INDEX_CACHE.get(sid)]
-    skipped = len(load_favorites()) - len(targets)
+    st = current_settings()
+    model = st["model"]
+    favs = load_favorites()
+    order = load_fav_order(favs)
+    picked = st.get("openAllIds")
+    if picked is not None:
+        picked = set(picked)
+        order = [sid for sid in order if sid in picked]
+    targets = [sid for sid in order if INDEX_CACHE.get(sid)]
+    skipped = len(favs) - len(targets)
     if not targets:
-        return False, "没有可打开的收藏会话（可能都只剩归档副本）", 0, skipped
+        return False, "没有可打开的收藏会话（可能都只剩归档副本，或设置里没勾选）", 0, skipped
     # 一条 wt 命令行开多个 tab：wt new-tab … ; new-tab …（wt 用 ; 分隔多条子命令）
     args = ["wt.exe", "-w", "last"]
     for i, sid in enumerate(targets):
@@ -1727,7 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
             json_resp(self, {"ok": ok, "error": err, "opened": opened, "skipped": skipped})
 
         elif path == "/api/settings":
-            # body: {model(str，可空=用默认), theme('light'|'dark')}
+            # body: {model, theme, openAll(bool 可选), openAllIds(list 可选=一键打开的会话范围)}
             m = str(body.get("model", "") or "").strip()
             t = str(body.get("theme", "") or "").strip()
             if m and not _MODEL_RE.match(m):
@@ -1735,8 +1799,17 @@ class Handler(BaseHTTPRequestHandler):
             elif t not in ("light", "dark"):
                 json_resp(self, {"ok": False, "error": "请选择白天模式或夜晚模式"})
             else:
+                s = {"model": m, "theme": t}
+                if isinstance(body.get("openAll"), bool):
+                    s["openAll"] = body["openAll"]
+                if isinstance(body.get("openAllIds"), list):
+                    ids = [str(i) for i in body["openAllIds"] if _SID_RE.match(str(i))]
+                    if len(ids) != len(body["openAllIds"]):
+                        json_resp(self, {"ok": False, "error": "会话 id 不合法"})
+                        return
+                    s["openAllIds"] = ids
                 try:
-                    save_settings({"model": m, "theme": t})
+                    save_settings(s)
                 except OSError:
                     json_resp(self, {"ok": False, "error": "写入 settings.json 失败"})
                 else:
